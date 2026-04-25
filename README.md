@@ -17,8 +17,8 @@ A PHP integration with the Afyanalytics Health Platform using the two-step hands
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/afyanalytics-integration.git
-cd afyanalytics-integration
+git clone https://github.com/SilaDennisN/AfyaAi.git
+cd AfyaAi
 ```
 
 ### 2. Configure credentials
