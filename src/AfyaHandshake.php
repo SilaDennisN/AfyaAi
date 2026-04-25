@@ -11,12 +11,51 @@ class AfyaHandshake
 
     public function __construct()
     {
-        $this->baseUrl       = getenv('AFYA_BASE_URL');
-        $this->platformName  = getenv('AFYA_PLATFORM_NAME');
-        $this->platformKey   = getenv('AFYA_PLATFORM_KEY');
-        $this->platformSecret= getenv('AFYA_PLATFORM_SECRET');
-        $this->callbackUrl   = getenv('AFYA_CALLBACK_URL');
-        $this->tokenFile     = __DIR__ . '/../storage/tokens.json';
+        $this->loadEnv();
+
+        $this->baseUrl        = getenv('AFYA_BASE_URL');
+        $this->platformName   = getenv('AFYA_PLATFORM_NAME');
+        $this->platformKey    = getenv('AFYA_PLATFORM_KEY');
+        $this->platformSecret = getenv('AFYA_PLATFORM_SECRET');
+        $this->callbackUrl    = getenv('AFYA_CALLBACK_URL');
+        $this->tokenFile      = __DIR__ . '/../storage/tokens.json';
+    }
+
+    private function loadEnv(): void
+    {
+        $envFile = __DIR__ . '/../.env';
+
+        if (!file_exists($envFile)) {
+            return;
+        }
+
+        foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $line = trim($line);
+
+            // Skip comments and blank lines
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if (!str_contains($line, '=')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $line, 2);
+            $key   = trim($key);
+            $value = trim($value);
+
+            // Strip surrounding quotes if present ("value" or 'value')
+            if (preg_match('/^(["\'])(.*)\\1$/', $value, $m)) {
+                $value = $m[2];
+            }
+
+            // Only set if not already defined in the environment (shell export takes priority)
+            if (getenv($key) === false) {
+                putenv("{$key}={$value}");
+                $_ENV[$key] = $value;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
