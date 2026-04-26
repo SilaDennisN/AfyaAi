@@ -39,13 +39,12 @@ file_put_contents($logFile,
 // 3. Read the incoming payload
 //    Afyanalytics may send JSON body or query params
 // ─────────────────────────────────────────────
-$rawBody = file_get_contents('php://input');  // Read raw POST body
-$body    = json_decode($rawBody, true);       // Try to decode as JSON
+$rawBody = file_get_contents('php://input'); 
+$body    = json_decode($rawBody, true);
 
 // Also capture any query string params (?handshake_token=xxx)
 $queryParams = $_GET;
 
-// Merge both — body takes priority
 $payload = array_merge($queryParams, $body ?? []);
 
 file_put_contents($logFile,
