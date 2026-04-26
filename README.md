@@ -1,6 +1,6 @@
 # Afyanalytics Platform Integration (PHP)
 
-A PHP integration with the Afyanalytics Health Platform using the two-step handshake authentication flow.
+A PHP integration with the Afyanalytics Health Platform using a secure two-step handshake authentication flow, encrypted token storage, and a callback endpoint.
 
 ---
 
@@ -8,6 +8,7 @@ A PHP integration with the Afyanalytics Health Platform using the two-step hands
 
 - PHP 7.4 or higher
 - cURL extension enabled (`php-curl`)
+- OpenSSL extension enabled (`php-openssl`)
 - HTTPS support for production
 
 ---
@@ -27,39 +28,52 @@ cd AfyaAi
 cp .env.example .env
 ```
 
-Edit `.env` and set your credentials (defaults are already filled in for the test assignment):
+Edit `.env` with your credentials:
 
 ```env
 AFYA_BASE_URL=https://staging.collabmed.net/api/external
 AFYA_PLATFORM_NAME=Test Platform v2
 AFYA_PLATFORM_KEY=afya_2d00d74512953c933172ab924f5073fa
 AFYA_PLATFORM_SECRET=e0502a5c052842cf19d0305455437b791d201761c88e2ad641680b2d5d356ba8
-AFYA_CALLBACK_URL=https://your-platform.com/callback
+AFYA_CALLBACK_URL=http://localhost:8000/callback.php
 ```
 
-### 3. Load environment variables and run
+### 3. Run the authentication flow
 
 ```bash
 export $(cat .env | xargs) && php run.php
 ```
 
-Or on Windows:
+Or on Windows (credentials are already defaulted in the class):
 
 ```bash
 php run.php
 ```
+
+### 4. (Optional) Start the callback server
+
+Open a second terminal and run:
+
+```bash
+php -S localhost:8000
+```
+
+This exposes `callback.php` at `http://localhost:8000/callback.php` so Afyanalytics can send notifications back to your platform.
 
 ---
 
 ## Project Structure
 
 ```
-afyanalytics-integration/
+AfyaAi/
 ├── src/
 │   └── AfyaHandshake.php     # Core authentication class
-├── storage/                  # Auto-created: stores tokens + logs (gitignored)
+├── storage/                  # Auto-created at runtime (gitignored)
+│   ├── tokens.enc            # Encrypted token storage (AES-256-CBC)
+│   └── afya.log              # Activity log (owner-only permissions)
+├── callback.php              # Webhook endpoint for Afyanalytics callbacks
 ├── run.php                   # Entry point — runs the full auth flow
-├── .env.example              # Template for credentials
+├── .env.example              # Credentials template
 ├── .gitignore
 └── README.md
 ```
@@ -68,9 +82,21 @@ afyanalytics-integration/
 
 ## How the Handshake Flow Works
 
-### Step 1 — Initiate Handshake
+The authentication uses a two-step handshake before your platform can access the API.
 
-The client sends platform credentials to `/initiate-handshake`:
+```
+Your Platform                  Afyanalytics API
+     |                                |
+     |--- POST /initiate-handshake -->|
+     |                                |
+     |<-- handshake_token (15 min) ---|
+     |                                |
+     |--- POST /complete-handshake -->|
+     |                                |
+     |<-- access_token + refresh_token|
+```
+
+### Step 1 — Initiate Handshake
 
 ```json
 POST /api/external/initiate-handshake
@@ -78,15 +104,13 @@ POST /api/external/initiate-handshake
   "platform_name": "Test Platform v2",
   "platform_key": "afya_2d00d...",
   "platform_secret": "e0502a5c...",
-  "callback_url": "https://your-platform.com/callback"
+  "callback_url": "http://localhost:8000/callback.php"
 }
 ```
 
-The API responds with a `handshake_token` that is **valid for 15 minutes**.
+The API responds with a `handshake_token` valid for **15 minutes**.
 
 ### Step 2 — Complete Handshake
-
-The client immediately uses that token to call `/complete-handshake`:
 
 ```json
 POST /api/external/complete-handshake
@@ -104,15 +128,43 @@ The API responds with a long-lived `access_token` and `refresh_token`.
 
 | Scenario | Behaviour |
 |---|---|
-| Valid access token exists in storage | Skips re-authentication, reuses token |
-| Access token expired | Automatically re-runs full handshake flow |
-| Handshake token expires before Step 2 | Throws a clear error with message |
-| API returns 4xx/5xx | Throws `RuntimeException` with the API message |
-| Network/cURL failure | Throws `RuntimeException` with cURL error detail |
+| Valid access token in storage | Skips re-authentication, reuses token |
+| Access token expired | Automatically re-runs the full handshake flow |
+| Handshake token expires before Step 2 | Throws a clear error message |
+| API returns 4xx/5xx | Throws `RuntimeException` with the API error message |
+| Network/cURL failure | Throws `RuntimeException` with the cURL error detail |
 
-A **30-second buffer** is applied when checking token validity to avoid race conditions near the expiry boundary.
+A **30-second buffer** is applied when checking token validity to prevent race conditions near the expiry boundary.
 
-Tokens are stored locally in `storage/tokens.json` and all activity is logged to `storage/afya.log`.
+---
+
+## How Secure Storage Works
+
+Tokens are never stored in plain text. The storage system uses:
+
+- **AES-256-CBC encryption** — tokens are encrypted before being written to disk
+- **Encryption key** derived from your `platform_secret` using SHA-256
+- **HMAC-SHA256 integrity check** — detects if the file has been tampered with
+- **File permissions** — `storage/` directory is `chmod 0700`, `tokens.enc` is `chmod 0600` (owner read/write only)
+- **Masked logs** — tokens and secrets are partially masked in `afya.log` (e.g. `G2WAEeNR...LJr`)
+
+If the storage file is corrupted or tampered with, the system resets gracefully and re-authenticates.
+
+---
+
+## How the Callback Works
+
+`callback.php` is a webhook endpoint that Afyanalytics calls after processing your handshake request. It handles three scenarios:
+
+| Incoming payload | Action |
+|---|---|
+| Contains `handshake_token` | Automatically calls `completeHandshake()` |
+| Contains `status` | Acknowledges the status ping |
+| Empty / unknown | Acknowledges receipt gracefully |
+
+All incoming requests are logged to `storage/afya.log`.
+
+For production, deploy `callback.php` behind a real domain and set `AFYA_CALLBACK_URL` accordingly. For local testing, use [ngrok](https://ngrok.com): `ngrok http 8000`.
 
 ---
 
@@ -123,21 +175,24 @@ Tokens are stored locally in `storage/tokens.json` and all activity is logged to
 ║     Afyanalytics Platform - Auth Integration     ║
 ╚══════════════════════════════════════════════════╝
 
-[2026-04-24 10:00:00] [INFO] === Starting Afyanalytics Authentication Flow ===
-[2026-04-24 10:00:00] [INFO] Initiating handshake...
-[2026-04-24 10:00:01] [INFO] POST https://staging.collabmed.net/api/external/initiate-handshake
-[2026-04-24 10:00:01] [INFO] HTTP Status: 200
-[2026-04-24 10:00:01] [INFO] Handshake initiated successfully.
-[2026-04-24 10:00:01] [INFO]   Handshake Token : xyz789abc...
-[2026-04-24 10:00:01] [INFO]   Expires At      : 2026-04-24T10:15:01+00:00
-[2026-04-24 10:00:01] [INFO]   Expires In      : 900 seconds
-[2026-04-24 10:00:01] [INFO] Completing handshake...
-[2026-04-24 10:00:02] [INFO] Handshake completed successfully!
-[2026-04-24 10:00:02] [INFO]   Access Token    : abc123def456...
-[2026-04-24 10:00:02] [INFO]   Expires At      : 2026-04-24T16:00:02+00:00
-[2026-04-24 10:00:02] [INFO]   Platform        : Test Platform v2
+[2026-04-24 14:06:00] [INFO] === Starting Afyanalytics Authentication Flow ===
+[2026-04-24 14:06:00] [INFO] Initiating handshake...
+[2026-04-24 14:06:00] [INFO] POST https://staging.collabmed.net/api/external/initiate-handshake
+[2026-04-24 14:06:01] [INFO] HTTP Status: 200
+[2026-04-24 14:06:01] [INFO] Handshake initiated successfully.
+[2026-04-24 14:06:01] [INFO]   Handshake Token : bjOFi1rK...AK82
+[2026-04-24 14:06:01] [INFO]   Expires At      : 2026-04-24T17:21:00+03:00
+[2026-04-24 14:06:01] [INFO]   Expires In      : 900 seconds
+[2026-04-24 14:06:01] [INFO] Completing handshake...
+[2026-04-24 14:06:01] [INFO] HTTP Status: 200
+[2026-04-24 14:06:01] [INFO] Handshake completed successfully!
+[2026-04-24 14:06:01] [INFO]   Access Token    : G2WAEeNR...NLJr
+[2026-04-24 14:06:01] [INFO]   Expires At      : 2026-04-24T23:06:01+03:00
+[2026-04-24 14:06:01] [INFO]   Platform        : Test Platform v2
+[2026-04-24 14:06:01] [INFO] Tokens saved to encrypted storage.
+[2026-04-24 14:06:01] [INFO] === Authentication Complete ===
 
-✅ Authentication Successful!
+Authentication Successful!
 ```
 
 ---
@@ -145,8 +200,8 @@ Tokens are stored locally in `storage/tokens.json` and all activity is logged to
 ## Error Handling
 
 ```
-❌ Authentication Failed!
+Authentication Failed!
 Error: Handshake initiation failed: Invalid platform credentials
 ```
 
-All errors are caught and displayed with a clear message. HTTP 4xx/5xx responses, invalid JSON, and network failures are all handled gracefully.
+All errors surface with a clear message. HTTP 4xx/5xx, invalid JSON, network failures, tampered storage, and missing credentials are all handled gracefully.
